@@ -1,0 +1,136 @@
+# RiTech EUDR — Walking Skeleton
+# Arranque: docker compose up --build   (o docker-compose up --build)
+# ADR-001: un servicio por bounded context + una BD lógica por servicio.
+# T14: redes separadas; solo api-gateway (8080) y eu-is-mock (8090, control del simulador) publican puertos.
+
+name: ritech-eudr
+
+x-healthcheck-node: &hc-node
+  interval: 5s
+  timeout: 3s
+  retries: 20
+  start_period: 5s
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_admin
+      POSTGRES_DB: postgres
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Se usa TCP (no socket) y la BD 'dds' (la última creada) para no dar "sano" durante la inicialización.
+      test: ["CMD-SHELL", "PGPASSWORD=$$POSTGRES_PASSWORD psql -h 127.0.0.1 -U postgres -d dds -tAc 'select 1' >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [datos]
+
+  # BC1 — Registro de Productores y Parcelas
+  registro-service:
+    build: ./services/registro-service
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://registro:registro_pw@postgres:5432/registro
+      GEO_URL: http://geo-service:3000
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"], <<: *hc-node }
+    networks: [servicios, datos]
+
+  # BC2 — Cumplimiento Geoespacial (D2)
+  geo-service:
+    build: ./services/geo-service
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://geo:geo_pw@postgres:5432/geo
+      TRAZABILIDAD_URL: http://trazabilidad-service:3000
+      RELAY_INTERVAL_MS: 1000
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"], <<: *hc-node }
+    networks: [servicios, datos]
+
+  # BC3 — Trazabilidad de Lotes (D1)
+  trazabilidad-service:
+    build: ./services/trazabilidad-service
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://trazabilidad:traza_pw@postgres:5432/trazabilidad
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"], <<: *hc-node }
+    networks: [servicios, datos]
+
+  # BC4 — Debida Diligencia y Pasarela UE (D3)
+  dds-service:
+    build: ./services/dds-service
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://dds:dds_pw@postgres:5432/dds
+      TRAZABILIDAD_URL: http://trazabilidad-service:3000
+      EU_IS_URL: http://eu-is-mock:8090
+      EU_TIMEOUT_MS: 5000
+      BACKOFF_BASE_MS: 1000
+      BACKOFF_MAX_MS: 15000
+      WORKER_INTERVAL_MS: 1000
+      PAIS_PRODUCCION: CO
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"], <<: *hc-node }
+    networks: [servicios, datos, externa]
+
+  # BC5 — Identidad y Acceso (genérico) + enrutamiento
+  api-gateway:
+    build: ./services/api-gateway
+    environment:
+      PORT: 8080
+      JWT_SECRET: cambiar-en-produccion
+      REGISTRO_URL: http://registro-service:3000
+      GEO_URL: http://geo-service:3000
+      TRAZABILIDAD_URL: http://trazabilidad-service:3000
+      DDS_URL: http://dds-service:3000
+    ports: ["8080:8080"]
+    depends_on:
+      registro-service: { condition: service_healthy }
+      geo-service: { condition: service_healthy }
+      trazabilidad-service: { condition: service_healthy }
+      dds-service: { condition: service_healthy }
+    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"], <<: *hc-node }
+    networks: [servicios]
+
+  # Sistema externo simulado: Sistema de Información EUDR de la UE
+  eu-is-mock:
+    build: ./services/eu-is-mock
+    environment:
+      PORT: 8090
+    ports: ["8090:8090"]
+    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:8090/_control/estadisticas"], <<: *hc-node }
+    networks: [externa]
+
+  # Recorrido automático de E1, E2, E3, R-1 y R-2. Se ejecuta una vez y termina.
+  demo:
+    build: ./demo
+    environment:
+      GATEWAY_URL: http://api-gateway:8080
+      EU_IS_URL: http://eu-is-mock:8090
+      # Solo para simular ataques al ledger (E1): credenciales del servicio y del superusuario.
+      TRAZA_DB_URL: postgres://trazabilidad:traza_pw@postgres:5432/trazabilidad
+      ADMIN_DB_URL: postgres://postgres:postgres_admin@postgres:5432/trazabilidad
+    depends_on:
+      api-gateway: { condition: service_healthy }
+      eu-is-mock: { condition: service_healthy }
+    restart: "no"
+    networks: [servicios, datos, externa]
+
+networks:
+  servicios: {}
+  datos:
+    internal: true
+  externa: {}
+
+volumes:
+  pgdata: {}

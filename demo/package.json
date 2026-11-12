@@ -1,0 +1,9 @@
+{
+  "name": "ritech-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RiTech EUDR — recorrido automático de los escenarios E1, E2, E3",
+  "main": "demo.js",
+  "engines": { "node": ">=20" },
+  "dependencies": { "pg": "8.13.1" }
+}

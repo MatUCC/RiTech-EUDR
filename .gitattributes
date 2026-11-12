@@ -1,0 +1,2 @@
+# Los scripts SQL y Dockerfiles se ejecutan en Linux: forzar LF aunque se clone en Windows.
+* text=auto eol=lf
